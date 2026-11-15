@@ -13,6 +13,8 @@ class PageResult(BaseModel, Generic[T]):
     total: int
     page: int = 1
     size: int = 20
+    # 列表页统计卡片口径：与列表同一查询链路算出，保证页面间结论一致
+    stats: dict[str, int] | None = None
 
 
 class ActionResult(BaseModel):

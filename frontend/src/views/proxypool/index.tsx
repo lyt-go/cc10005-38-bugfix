@@ -13,6 +13,7 @@ const columns = [
   "存活检测时间",
   "分配权重"
 ]
+const extraColumns = ["代理版本", "当前分配策略", "冻结出站地域", "冻结响应毫秒"]
 const actions = [
   "提交存活检测",
   "标记可用",
@@ -24,27 +25,39 @@ const statuses = [
   "可用",
   "已回收"
 ]
-const stats = [
-  {
-    "label": "代理实例总数",
-    "value": 0
-  },
-  {
-    "label": "可用实例数",
-    "value": 0
-  },
-  {
-    "label": "检测中实例数",
-    "value": 0
-  }
-]
+const statLabels = ["代理实例总数", "可用实例数", "检测中实例数"]
 
-type Row = Record<string, string | number | null>
+type Row = {
+  id: number | string
+  status?: string
+  代理版本?: number | null
+  当前分配策略?: string | null
+  冻结出站地域?: string | null
+  冻结响应毫秒?: string | null
+  [key: string]: unknown
+}
+
+/** 各状态下可执行的动作（仅作按钮置灰提示，最终以后端拦截为准） */
+function allowedActions(row: Row): string[] {
+  switch (row.status) {
+    case '草稿':
+      return ['提交存活检测', '回收实例']
+    case '存活检测中':
+      return ['标记可用', '回收实例']
+    case '可用':
+      return ['回收实例']
+    default:
+      // 已回收为终态，不再提供任何动作
+      return []
+  }
+}
 
 export default function ProxypoolView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
+  const [stats, setStats] = useState<Record<string, number>>({})
   const [errorMessage, setErrorMessage] = useState('')
+  const [notice, setNotice] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
 
@@ -59,6 +72,7 @@ export default function ProxypoolView() {
       const payload = await response.json()
       setRows(payload.items ?? [])
       setTotal(payload.total ?? 0)
+      setStats(payload.stats ?? {})
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '代理池管理列表读取失败')
     }
@@ -70,19 +84,24 @@ export default function ProxypoolView() {
 
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
+    setNotice('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
         body: JSON.stringify({ action }),
       })
-      if (!response.ok) {
-        throw new Error('代理池管理动作未生效，请稍后重试')
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.message ?? '代理池管理动作未生效，请稍后重试')
       }
+      setNotice(payload?.message ?? `已执行：${action}`)
       await reload()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '代理池管理操作失败')
     }
   }
+
+  const exportQuery = new URLSearchParams(filters).toString()
 
   return (
     <section className="page" data-module="proxypool">
@@ -95,17 +114,17 @@ export default function ProxypoolView() {
           <button className="btn primary" type="button" onClick={() => setErrorMessage('代理实例登记入口尚未接入审批流')}>
             登记代理实例
           </button>
-          <button className="btn" type="button" onClick={() => window.open(`${ENDPOINT}/export`, '_blank')}>
+          <button className="btn" type="button" onClick={() => window.open(`${ENDPOINT}/export?${exportQuery}`, '_blank')}>
             导出代理池管理清单
           </button>
         </div>
       </header>
 
       <div className="stat-row">
-        {stats.map((item) => (
-          <article key={item.label} className="stat-card">
-            <span className="stat-label">{item.label}</span>
-            <strong className="stat-value">{item.value}</strong>
+        {statLabels.map((label) => (
+          <article key={label} className="stat-card">
+            <span className="stat-label">{label}</span>
+            <strong className="stat-value">{stats[label] ?? 0}</strong>
           </article>
         ))}
       </div>
@@ -129,25 +148,40 @@ export default function ProxypoolView() {
         <thead>
           <tr>
             {columns.map((column) => <th key={column}>{column}</th>)}
+            {extraColumns.map((column) => <th key={column}>{column}</th>)}
             <th>可执行动作</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
-            <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
-              <td className="row-actions">
-                {actions.map((action) => (
-                  <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>
-                    {action}
-                  </button>
-                ))}
-              </td>
-            </tr>
-          ))}
+          {rows.map((row) => {
+            const enabled = allowedActions(row)
+            return (
+              <tr key={String(row.id)}>
+                {columns.map((column) => <td key={column}>{String(row[column] ?? '—')}</td>)}
+                <td>{row.代理版本 ?? '—'}</td>
+                <td>{row.当前分配策略 ?? '—'}</td>
+                <td>{row.冻结出站地域 ?? '—'}</td>
+                <td>{row.冻结响应毫秒 ?? '—'}</td>
+                <td className="row-actions">
+                  {actions.map((action) => (
+                    <button
+                      key={action}
+                      className="link"
+                      type="button"
+                      disabled={!enabled.includes(action)}
+                      title={enabled.includes(action) ? undefined : `当前状态「${row.status}」不可执行该动作`}
+                      onClick={() => void runAction(action, row)}
+                    >
+                      {action}
+                    </button>
+                  ))}
+                </td>
+              </tr>
+            )
+          })}
           {rows.length === 0 && (
             <tr>
-              <td className="empty-state" colSpan={columns.length + 1}>暂无代理池管理数据，可先登记代理实例</td>
+              <td className="empty-state" colSpan={columns.length + extraColumns.length + 1}>暂无代理池管理数据，可先登记代理实例</td>
             </tr>
           )}
         </tbody>
@@ -155,6 +189,7 @@ export default function ProxypoolView() {
 
       <footer className="page-foot">
         <span>共 {total} 条代理池管理记录</span>
+        {notice && <span className="notice-text">{notice}</span>}
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>

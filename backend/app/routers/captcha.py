@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.captcha import CaptchaService
+from app.services.captcha import FILTERABLE_FIELDS, CaptchaService
 
 router = APIRouter(prefix="/api/captcha", tags=["验证码处理"])
 
@@ -16,8 +16,18 @@ LIST_FIELDS = ["策略编号", "验证码类型", "识别服务商", "识别超�
 STATUSES = ["草稿", "策略验证中", "已启用", "已降级"]
 
 
+def _field_filters(request: Request) -> dict[str, str]:
+    """从查询串里提取字段级筛选，列表与导出共用同一口径，保证两处结果一致。"""
+    return {
+        field: str(request.query_params[field]).strip()
+        for field in FILTERABLE_FIELDS
+        if request.query_params.get(field)
+    }
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
+    request: Request,
     keyword: str | None = Query(default=None, description="按策略编号检索"),
     status: str | None = Query(default=None, description="草稿、策略验证中、已启用、已降级"),
     page: int = 1,
@@ -26,8 +36,25 @@ def list_entries(
     """按策略编号与状态过滤验证码处理列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    items, total, stats = service.list_entries(
+        keyword=keyword, status=status, field_filters=_field_filters(request), page=page, size=size
+    )
+    return PageResult(items=items, total=total, page=page, size=size, stats=stats)
+
+
+# 注意：/export 必须注册在 /{entry_id} 之前，否则 "export" 会被当成 entry_id 解析，
+# 导出标签页直接 422 —— 列表页有数据、标签页报错，两处结论对不上。
+@router.get("/export")
+def export_entries(
+    request: Request,
+    keyword: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """导出验证码处理清单：与列表页走同一查询链路和同一套筛选条件。"""
+    items, total, _ = service.list_entries(
+        keyword=keyword, status=status, field_filters=_field_filters(request), page=1, size=10000
+    )
+    return {"module": "captcha", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +83,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出验证码处理清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "captcha", "total": total, "items": items}
